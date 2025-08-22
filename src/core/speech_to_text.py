@@ -1,20 +1,28 @@
-"""
-Speech-to-Text Module
-Handles audio input and conversion to text
-"""
-
-import speech_recognition as sr
 import pyaudio
+import numpy as np
 import time
+import speech_recognition as sr
+import requests
+import json
+import tempfile
+import wave
+import os
 
 class SpeechRecognizer:
-    """Handles speech recognition functionality"""
-    
-    def __init__(self, timeout=5, phrase_timeout=2):
+    def __init__(self, use_whisper=False, whisper_api_key=None):
+        """ 
+        Initialize speech recognizer
+        use_whisper: Whether to use Whisper API (requires API key)
+        whisper_api_key: OpenAI API key for Whisper (if using API)
+        """
+        self.use_whisper_api = use_whisper
+        self.whisper_api_key = whisper_api_key
+        
+        # Initialize speech_recognition as default
         self.recognizer = sr.Recognizer()
         self.microphone = sr.Microphone()
-        self.timeout = timeout
-        self.phrase_timeout = phrase_timeout
+        self.timeout = 5
+        self.phrase_timeout = 3
         
         # Adjust for ambient noise
         self.calibrate_microphone()
@@ -28,6 +36,76 @@ class SpeechRecognizer:
                 print("Microphone calibrated.")
         except Exception as e:
             print(f"Microphone calibration warning: {e}")
+    
+    def record_audio(self, record_seconds=5):
+        """Record audio using PyAudio as fallback"""
+        try:
+            audio = pyaudio.PyAudio()
+            stream = audio.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=16000,
+                input=True,
+                frames_per_buffer=1024
+            )
+            
+            print("Recording... (speak now)")
+            frames = []
+            
+            for _ in range(0, int(16000 / 1024 * record_seconds)):
+                data = stream.read(1024)
+                frames.append(data)
+            
+            print("Recording finished")
+            stream.stop_stream()
+            stream.close()
+            audio.terminate()
+            
+            # Save to temporary WAV file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+                with wave.open(tmp_file.name, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(audio.get_sample_size(pyaudio.paInt16))
+                    wf.setframerate(16000)
+                    wf.writeframes(b''.join(frames))
+                return tmp_file.name
+                
+        except Exception as e:
+            print(f"Error recording audio: {e}")
+            return None
+    
+    def transcribe_with_whisper_api(self, audio_file_path):
+        """Transcribe audio using Whisper API"""
+        if not self.whisper_api_key:
+            print("Whisper API key not provided")
+            return None
+            
+        try:
+            with open(audio_file_path, 'rb') as audio_file:
+                response = requests.post(
+                    'https://api.openai.com/v1/audio/transcriptions',
+                    headers={
+                        'Authorization': f'Bearer {self.whisper_api_key}'
+                    },
+                    files={
+                        'file': audio_file
+                    },
+                    data={
+                        'model': 'whisper-1',
+                        'language': 'en'
+                    }
+                )
+            
+            if response.status_code == 200:
+                result = response.json()
+                return result.get('text', '').strip()
+            else:
+                print(f"Whisper API error: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            print(f"Error calling Whisper API: {e}")
+            return None
     
     def listen_and_convert(self):
         """
@@ -47,25 +125,30 @@ class SpeechRecognizer:
             
             print("Processing audio...")
             
-            # Convert speech to text using Google Speech Recognition
+            # Try Google Speech Recognition first
             try:
                 text = self.recognizer.recognize_google(audio)
                 print(f"Recognized text: {text}")
                 return text.lower().strip()
             
             except sr.UnknownValueError:
-                print("Could not understand the audio")
-                return None
+                print("Google could not understand the audio")
+                # Fallback to other services
+                pass
             
             except sr.RequestError as e:
-                print(f"Error with speech recognition service: {e}")
-                # Fallback to offline recognition if available
-                try:
-                    text = self.recognizer.recognize_sphinx(audio)
-                    print(f"Offline recognition: {text}")
-                    return text.lower().strip()
-                except:
-                    return None
+                print(f"Error with Google service: {e}")
+                # Fallback to other services
+                pass
+            
+            # Try Sphinx (offline) as fallback
+            try:
+                text = self.recognizer.recognize_sphinx(audio)
+                print(f"Offline recognition: {text}")
+                return text.lower().strip()
+            except:
+                print("Offline recognition also failed")
+                return None
         
         except sr.WaitTimeoutError:
             print("No speech detected within timeout period")
@@ -73,7 +156,24 @@ class SpeechRecognizer:
         
         except Exception as e:
             print(f"Speech recognition error: {e}")
+            
+            # Final fallback: record audio and try Whisper API if enabled
+            if self.use_whisper_api:
+                print("Trying Whisper API as fallback...")
+                audio_file = self.record_audio()
+                if audio_file:
+                    text = self.transcribe_with_whisper_api(audio_file)
+                    # Clean up temporary file
+                    try:
+                        os.unlink(audio_file)
+                    except:
+                        pass
+                    return text
             return None
+    
+    def listen_for_search(self):
+        """Capture voice input and convert to text"""
+        return self.listen_and_convert()
     
     def listen_continuous(self, callback, stop_listening=None):
         """
@@ -92,7 +192,7 @@ class SpeechRecognizer:
             if text:
                 callback(text)
             
-            time.sleep(0.1)  # Brief pause between attempts
+            time.sleep(0.1)
     
     def test_microphone(self):
         """Test microphone functionality"""
@@ -122,48 +222,3 @@ class SpeechRecognizer:
         except Exception as e:
             print(f"Failed to set microphone {index}: {e}")
             return False
-
-# Simple audio recorder class for basic functionality
-class SimpleAudioRecorder:
-    """Fallback audio recorder if speech_recognition fails"""
-    
-    def __init__(self, sample_rate=44100, channels=1, chunk_size=1024):
-        self.sample_rate = sample_rate
-        self.channels = channels
-        self.chunk_size = chunk_size
-        self.audio = pyaudio.PyAudio()
-    
-    def record_audio(self, duration=5):
-        """Record audio for specified duration"""
-        try:
-            stream = self.audio.open(
-                format=pyaudio.paInt16,
-                channels=self.channels,
-                rate=self.sample_rate,
-                input=True,
-                frames_per_buffer=self.chunk_size
-            )
-            
-            print(f"Recording for {duration} seconds...")
-            frames = []
-            
-            for _ in range(0, int(self.sample_rate / self.chunk_size * duration)):
-                data = stream.read(self.chunk_size)
-                frames.append(data)
-            
-            stream.stop_stream()
-            stream.close()
-            
-            print("Recording complete")
-            return b''.join(frames)
-        
-        except Exception as e:
-            print(f"Recording error: {e}")
-            return None
-    
-    def __del__(self):
-        """Cleanup audio resources"""
-        try:
-            self.audio.terminate()
-        except:
-            pass
