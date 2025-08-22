@@ -1,0 +1,18 @@
+# Song Finder System Requirements
+# Install with: pip install -r requirements.txt
+
+# GUI Framework
+PyQt5==5.15.9
+
+# Speech Recognition
+SpeechRecognition==3.10.0
+pyaudio==0.2.11
+
+# Alternative speech recognition libraries (optional)
+# pocketsphinx==0.1.15  # For offline recognition
+
+# Audio processing
+# librosa==0.9.2  # For advanced audio processing (optional)
+
+# System dependencies (install separately if needed)
+# For Windows: Download and install PyAudio wheel from https://www.lfd.uci.edu/~gohlke/pythonlibs/#py
