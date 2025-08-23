@@ -4,7 +4,7 @@ import unicodedata
 
 class NGramProcessor:
     """Handles n-gram generation, text preprocessing, similarity, and sequence probability"""
-    
+
     def __init__(self, n_sizes=[2, 3, 4]):
         self.n_sizes = n_sizes
         self.stop_words = {
@@ -16,22 +16,21 @@ class NGramProcessor:
         self.unigram_counts = Counter()
         self.total_unigrams = 0
 
-    # ------------------- Preprocessing / Tokenization -------------------
+    # ---------------- Text Preprocessing ----------------
     def preprocess_text(self, text):
         if not text:
             return ""
         text = text.lower()
         text = unicodedata.normalize('NFD', text)
-        text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')  # remove accents
+        text = ''.join(c for c in text if unicodedata.category(c) != 'Mn')
         contractions = {
-            "don't": "do not", "won't": "will not", "can't": "cannot",
-            "n't": " not", "'re": " are", "'ve": " have", "'ll": " will",
-            "'d": " would", "'m": " am", "i'm": "i am", "you're": "you are",
-            "he's": "he is", "she's": "she is", "it's": "it is",
-            "we're": "we are", "they're": "they are"
+            "don't": "do not", "won't": "will not", "can't": "cannot", "n't": " not",
+            "'re": " are", "'ve": " have", "'ll": " will", "'d": " would", "'m": " am",
+            "i'm": "i am", "you're": "you are", "he's": "he is", "she's": "she is",
+            "it's": "it is", "we're": "we are", "they're": "they are"
         }
-        for contraction, expansion in contractions.items():
-            text = text.replace(contraction, expansion)
+        for k, v in contractions.items():
+            text = text.replace(k, v)
         text = re.sub(r'[^\w\s]', ' ', text)
         text = re.sub(r'\s+', ' ', text).strip()
         text = re.sub(r'(.)\1{2,}', r'\1\1', text)
@@ -42,15 +41,14 @@ class NGramProcessor:
             return []
         return text.split()
 
-    # ------------------- N-grams -------------------
+    # ---------------- N-grams ----------------
     def generate_ngrams(self, tokens, n):
         if len(tokens) < n:
             return []
-        return [tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1)]
+        return [tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1)]
 
     def process_text_to_ngrams(self, text):
-        processed_text = self.preprocess_text(text)
-        tokens = self.tokenize(processed_text)
+        tokens = self.tokenize(self.preprocess_text(text))
         if not tokens:
             return {}
         all_ngrams = {}
@@ -61,60 +59,100 @@ class NGramProcessor:
         return all_ngrams
 
     def ngrams_to_counter(self, ngrams_dict):
-        counters = {}
-        for n, ngrams in ngrams_dict.items():
-            counters[n] = Counter(ngrams)
-        return counters
+        return {n: Counter(ngrams) for n, ngrams in ngrams_dict.items()}
 
-    # ------------------- Training / Counting -------------------
+    # ---------------- Training ----------------
     def train_corpus(self, text):
         tokens = self.tokenize(self.preprocess_text(text))
         self.unigram_counts = Counter(tokens)
         self.total_unigrams = len(tokens)
-        self.ngram_counts = {}
+        self.ngram_counts = {1: self.unigram_counts}
         for n in self.n_sizes:
             ngrams = self.generate_ngrams(tokens, n)
             self.ngram_counts[n] = Counter(ngrams)
 
-    # ------------------- Interpolated probability -------------------
+    # ---------------- Interpolated Probability ----------------
     def interpolated_probability_dynamic(self, word, context, lambdas=None, debug=False):
-        if lambdas is None:
-            lambdas = [0.3, 0.4, 0.3]  # bigram, trigram, 4-gram
+        # Return tiny probability if model uninitialized
+        if self.total_unigrams == 0:
+            return 1e-12
 
-        p_uni = self.unigram_counts[word] / self.total_unigrams if self.total_unigrams > 0 else 1e-6
+        # Unigram with light additive smoothing for OOV safety
+        vocab_size = max(len(self.unigram_counts), 1)
+        alpha = 1e-3
+        count_w = self.unigram_counts.get(word, 0)
+        p1 = (count_w + alpha) / (self.total_unigrams + alpha * vocab_size)
 
-        p_bi = p_tri = p_quad = 0
+        # Bigram
+        p2 = 0.0
         if len(context) >= 1:
-            bg = tuple(context[-1:] + [word])
-            count_bg = self.ngram_counts.get(2, Counter()).get(bg, 0)
-            count_prev = self.ngram_counts.get(1, Counter()).get(tuple(context[-1:]), 0)
-            p_bi = count_bg / count_prev if count_prev > 0 else 0
-        if len(context) >= 2:
-            tg = tuple(context[-2:] + [word])
-            count_tg = self.ngram_counts.get(3, Counter()).get(tg, 0)
-            count_prev = self.ngram_counts.get(2, Counter()).get(tuple(context[-2:]), 0)
-            p_tri = count_tg / count_prev if count_prev > 0 else 0
-        if len(context) >= 3:
-            fg = tuple(context[-3:] + [word])
-            count_fg = self.ngram_counts.get(4, Counter()).get(fg, 0)
-            count_prev = self.ngram_counts.get(3, Counter()).get(tuple(context[-3:]), 0)
-            p_quad = count_fg / count_prev if count_prev > 0 else 0
+            prev1 = context[-1]
+            denom = self.unigram_counts.get(prev1, 0)
+            if denom > 0:
+                p2 = self.ngram_counts.get(2, Counter()).get((prev1, word), 0) / denom
 
+        # Trigram
+        p3 = 0.0
+        if len(context) >= 2:
+            prev2 = tuple(context[-2:])
+            denom = self.ngram_counts.get(2, Counter()).get(prev2, 0)
+            if denom > 0:
+                p3 = self.ngram_counts.get(3, Counter()).get(prev2 + (word,), 0) / denom
+
+        # 4-gram
+        p4 = 0.0
         if len(context) >= 3:
-            p = lambdas[2]*p_quad + lambdas[1]*p_tri + lambdas[0]*p_bi + 0.01*p_uni
-        elif len(context) == 2:
-            p = lambdas[1]*p_tri + lambdas[0]*p_bi + 0.01*p_uni
-        elif len(context) == 1:
-            p = lambdas[0]*p_bi + 0.01*p_uni
+            prev3 = tuple(context[-3:])
+            denom = self.ngram_counts.get(3, Counter()).get(prev3, 0)
+            if denom > 0:
+                p4 = self.ngram_counts.get(4, Counter()).get(prev3 + (word,), 0) / denom
+
+        # Interpret lambdas
+        if lambdas is None:
+            weights = {1: 0.1, 2: 0.3, 3: 0.3, 4: 0.3}
+        elif isinstance(lambdas, dict):
+            weights = {
+                1: lambdas.get(1, 0.0),
+                2: lambdas.get(2, 0.0),
+                3: lambdas.get(3, 0.0),
+                4: lambdas.get(4, 0.0)
+            }
         else:
-            p = p_uni
+            if len(lambdas) == 4:
+                weights = {1: lambdas[0], 2: lambdas[1], 3: lambdas[2], 4: lambdas[3]}
+            elif len(lambdas) == 3:
+                rem = max(0.0, 1.0 - sum(lambdas))
+                weights = {1: rem, 2: lambdas[0], 3: lambdas[1], 4: lambdas[2]}
+            elif len(lambdas) == 2:
+                rem = max(0.0, 1.0 - sum(lambdas))
+                weights = {1: rem, 2: lambdas[0], 3: lambdas[1], 4: 0.0}
+            else:
+                weights = {1: 1.0, 2: 0.0, 3: 0.0, 4: 0.0}
+
+        # Only include up to (context length + 1) order
+        max_order = min(1 + len(context), 4)
+        probs = {1: p1, 2: p2, 3: p3, 4: p4}
+        included_orders = [o for o in range(1, max_order + 1) if weights.get(o, 0.0) > 0]
+
+        # Fallback to unigram if all weights were zeroed
+        if not included_orders:
+            included_orders = [1]
+
+        # Renormalize weights
+        total_w = sum(weights[o] for o in included_orders)
+        if total_w <= 0:
+            normalized = {o: 1.0 / len(included_orders) for o in included_orders}
+        else:
+            normalized = {o: weights[o] / total_w for o in included_orders}
+
+        p = sum(normalized[o] * probs[o] for o in included_orders)
 
         if debug:
-            print(f"Word: '{word}', Context: {context}")
-            print(f"  Uni: {p_uni:.6f}, Bi: {p_bi:.6f}, Tri: {p_tri:.6f}, Quad: {p_quad:.6f}")
-            print(f"  Interpolated Prob: {p:.6f}\n")
+            dbg = {f'p{o}': probs[o] for o in [1, 2, 3, 4]}
+            wdbg = {f'w{o}': normalized.get(o, 0.0) for o in [1, 2, 3, 4]}
+            print(f"Word:'{word}', Context:{context[-3:]}, {dbg}, {wdbg}, Interp:{p:.8f}")
 
-        return max(p, 1e-6)
+        return max(p, 1e-12)
 
     def sequence_probability(self, words, lambdas=None, debug=False):
         prob = 1.0
@@ -127,7 +165,7 @@ class NGramProcessor:
                 context.pop(0)
         return prob
 
-    # ------------------- Similarity -------------------
+    # ---------------- Similarity ----------------
     def calculate_ngram_similarity(self, ngrams1, ngrams2, similarity_type='cosine'):
         if similarity_type == 'jaccard':
             return self._jaccard_similarity(ngrams1, ngrams2)
@@ -145,9 +183,7 @@ class NGramProcessor:
             return 1.0
         if not set1 or not set2:
             return 0.0
-        intersection = len(set1.intersection(set2))
-        union = len(set1.union(set2))
-        return intersection / union if union > 0 else 0.0
+        return len(set1.intersection(set2)) / len(set1.union(set2)) if len(set1.union(set2)) > 0 else 0.0
 
     def _cosine_similarity(self, counter1, counter2):
         if not isinstance(counter1, Counter):
@@ -159,42 +195,42 @@ class NGramProcessor:
         common_terms = set(counter1.keys()).intersection(set(counter2.keys()))
         if not common_terms:
             return 0.0
-        dot_product = sum(counter1[term]*counter2[term] for term in common_terms)
-        magnitude1 = sum(count**2 for count in counter1.values())**0.5
-        magnitude2 = sum(count**2 for count in counter2.values())**0.5
-        if magnitude1 == 0 or magnitude2 == 0:
+        dot = sum(counter1[term] * counter2[term] for term in common_terms)
+        mag1 = sum(v ** 2 for v in counter1.values()) ** 0.5
+        mag2 = sum(v ** 2 for v in counter2.values()) ** 0.5
+        if mag1 == 0 or mag2 == 0:
             return 0.0
-        return dot_product / (magnitude1*magnitude2)
+        return dot / (mag1 * mag2)
 
     def combine_ngram_scores(self, scores_dict, weights=None):
         if not scores_dict:
             return 0.0
         if weights is None:
-            weights = {2:0.3, 3:0.4, 4:0.3, 1:0.1}  # include unigram fallback weight
+            weights = {2: 0.3, 3: 0.4, 4: 0.3, 1: 0.1}
         total_score = 0.0
         total_weight = 0.0
         for n, score in scores_dict.items():
-            weight = weights.get(n, 1.0)
-            total_score += score * weight
-            total_weight += weight
+            w = weights.get(n, 1.0)
+            total_score += score * w
+            total_weight += w
         return total_score / total_weight if total_weight > 0 else 0.0
 
     def extract_keywords(self, text, min_length=3, max_keywords=10):
-        processed_text = self.preprocess_text(text)
-        tokens = self.tokenize(processed_text)
-        keywords = [token for token in tokens if len(token) >= min_length and token not in self.stop_words]
-        keyword_freq = Counter(keywords)
-        return [word for word, freq in keyword_freq.most_common(max_keywords)]
+        text = self.preprocess_text(text)
+        tokens = self.tokenize(text)
+        keywords = [t for t in tokens if len(t) >= min_length and t not in self.stop_words]
+        freq = Counter(keywords)
+        return [w for w, _ in freq.most_common(max_keywords)]
 
     def get_text_statistics(self, text):
-        processed_text = self.preprocess_text(text)
-        tokens = self.tokenize(processed_text)
+        processed = self.preprocess_text(text)
+        tokens = self.tokenize(processed)
         stats = {
             'original_length': len(text),
-            'processed_length': len(processed_text),
+            'processed_length': len(processed),
             'word_count': len(tokens),
             'unique_words': len(set(tokens)),
-            'average_word_length': sum(len(word) for word in tokens)/len(tokens) if tokens else 0
+            'average_word_length': sum(len(w) for w in tokens) / len(tokens) if tokens else 0
         }
         ngrams_dict = self.process_text_to_ngrams(text)
         for n, ngrams in ngrams_dict.items():
@@ -202,27 +238,26 @@ class NGramProcessor:
             stats[f'unique_{n}_grams'] = len(set(ngrams))
         return stats
 
-    # ------------------- Fixed find_similar_phrases -------------------
-    def find_similar_phrases(self, query_text, corpus_texts, threshold=0.05):
-        query_ngrams = self.process_text_to_ngrams(query_text)
-        query_counters = self.ngrams_to_counter(query_ngrams)
-        similar_texts = []
-        for text in corpus_texts:
-            text_ngrams = self.process_text_to_ngrams(text)
-            text_counters = self.ngrams_to_counter(text_ngrams)
-            scores = {}
-            for n in self.n_sizes:
-                if n in query_counters and n in text_counters:
-                    score = self.calculate_ngram_similarity(query_counters[n], text_counters[n], 'cosine')
-                    scores[n] = score
-            # fallback to unigram cosine similarity if all n-grams are zero
-            if not scores or all(v == 0 for v in scores.values()):
-                uni_score = self._cosine_similarity(Counter(self.tokenize(query_text)),
-                                                   Counter(self.tokenize(text)))
-                scores[1] = uni_score
-            if scores:
-                combined_score = self.combine_ngram_scores(scores)
-                if combined_score >= threshold:
-                    similar_texts.append((text, combined_score))
-        similar_texts.sort(key=lambda x: x[1], reverse=True)
-        return similar_texts
+    # ---------------- Next-word Prediction ----------------
+    def predict_next_word_probabilities(self, context_words, top_k=10):
+        if not self.unigram_counts:
+            return []
+        probs = []
+        for w in self.unigram_counts.keys():
+            p = self.interpolated_probability_dynamic(w, context_words)
+            probs.append((w, p))
+        probs.sort(key=lambda x: x[1], reverse=True)
+        return probs[:top_k]
+
+    def generate_text(self, seed_text, max_length=10):
+        if not self.unigram_counts:
+            return seed_text
+        tokens = self.tokenize(self.preprocess_text(seed_text))
+        output = tokens[:]
+        for _ in range(max_length):
+            candidates = self.predict_next_word_probabilities(output)
+            if not candidates:
+                break
+            w, p = candidates[0]
+            output.append(w)
+        return ' '.join(output)
